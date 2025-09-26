@@ -1,21 +1,20 @@
-
+import os
+import sqlite3
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-import sqlite3
 from fastapi import Query
 
 DB_FILE = "matches.db"
 
 # ----------------------
-# DB初期化
+# DB 初期化関数
 # ----------------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    # users テーブル
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,7 +23,6 @@ def init_db():
     )
     """)
 
-    # matchesテーブル
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS matches (
         match_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,18 +34,15 @@ def init_db():
     )
     """)
 
-    # teamsテーブル
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS teams (
         team_id INTEGER PRIMARY KEY AUTOINCREMENT,
         match_id INTEGER,
         pokemon TEXT,
         team TEXT CHECK(team IN ('ally','enemy')),
-        FOREIGN KEY(match_id) REFERENCES matches(match_id)
-    )
+        FOREIGN KEY(match_id) REFERENCES matches(match_id))
     """)
 
-    # featuresテーブル
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS features (
         feature_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,29 +56,30 @@ def init_db():
     )
     """)
 
-    # インデックス作成
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_teams_pokemon ON teams(pokemon)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_matches_user ON matches(user_id)")
-
     conn.commit()
     conn.close()
     print("DBとテーブルを作成しました")
 
-# アプリ起動時にDB初期化
-init_db()
-DB_FILE = "matches.db"
+# ----------------------
+# DBがなければ作る
+# ----------------------
+if not os.path.exists(DB_FILE):
+    init_db()
 
+# ----------------------
+# FastAPI 初期化
+# ----------------------
 app = FastAPI()
 
-# CORS許可
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 開発用: 全部許可
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # ----------------------
 # モデル定義
 # ----------------------
