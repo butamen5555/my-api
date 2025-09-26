@@ -6,7 +6,8 @@ from pydantic import BaseModel
 from typing import List, Optional
 from fastapi import Query
 
-DB_FILE = "matches.db"
+#DB_FILE = "matches.db"
+DB_FILE = "/tmp/matches.db"
 
 # ----------------------
 # DB 初期化関数
@@ -396,7 +397,18 @@ def search_next2(
     return suggest
 
 
+if __name__ == "__main__":
+    import uvicorn
 
+    if not os.path.exists(DB_FILE):
+        init_db()
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8080)),  # Renderは$PORT、ローカルは8080
+        reload=True
+    )
 
 
 
