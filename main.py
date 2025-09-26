@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -5,6 +6,71 @@ from typing import List, Optional
 import sqlite3
 from fastapi import Query
 
+DB_FILE = "matches.db"
+
+# ----------------------
+# DB初期化
+# ----------------------
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    # users テーブル
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL
+    )
+    """)
+
+    # matchesテーブル
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS matches (
+        match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        ally_win BOOLEAN,
+        patch TEXT,
+        date TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """)
+
+    # teamsテーブル
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS teams (
+        team_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id INTEGER,
+        pokemon TEXT,
+        team TEXT CHECK(team IN ('ally','enemy')),
+        FOREIGN KEY(match_id) REFERENCES matches(match_id)
+    )
+    """)
+
+    # featuresテーブル
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS features (
+        feature_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id INTEGER,
+        ally_early_win BOOLEAN DEFAULT NULL,
+        ally_late_win BOOLEAN DEFAULT NULL,
+        close_game BOOLEAN DEFAULT NULL,
+        pachinko BOOLEAN DEFAULT NULL,
+        last_hit BOOLEAN DEFAULT NULL,
+        FOREIGN KEY(match_id) REFERENCES matches(match_id)
+    )
+    """)
+
+    # インデックス作成
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_teams_pokemon ON teams(pokemon)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_matches_user ON matches(user_id)")
+
+    conn.commit()
+    conn.close()
+    print("DBとテーブルを作成しました")
+
+# アプリ起動時にDB初期化
+init_db()
 DB_FILE = "matches.db"
 
 app = FastAPI()
