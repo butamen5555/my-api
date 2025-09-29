@@ -202,6 +202,7 @@ def search_matches_core(ally: List[str] = None, enemy: List[str] = None, user_id
     params = []
     conds = []
 
+    # --- 条件構築 ---
     if ally:
         placeholders = ",".join(["%s"] * len(ally))
         conds.append(f"SUM(CASE WHEN t.team='ally' AND t.pokemon IN ({placeholders}) THEN 1 ELSE 0 END) = %s")
@@ -213,7 +214,23 @@ def search_matches_core(ally: List[str] = None, enemy: List[str] = None, user_id
         params.extend(enemy)
         params.append(len(enemy))
 
-    query = "SELECT t.match_id FROM teams t JOIN matches m ON t.match_id = m.match_id"
+    query = """
+        SELECT 
+            m.match_id,
+            m.ally_win,
+            m.patch,
+            json_agg(DISTINCT jsonb_build_object('pokemon', t.pokemon, 'team', t.team)) AS teams,
+            jsonb_build_object(
+                'ally_early_win', f.ally_early_win,
+                'ally_late_win', f.ally_late_win,
+                'close_game', f.close_game,
+                'pachinko', f.pachinko,
+                'last_hit', f.last_hit
+            ) AS features
+        FROM matches m
+        JOIN teams t ON m.match_id = t.match_id
+        LEFT JOIN features f ON m.match_id = f.match_id
+    """
     query_conds = []
     if user_id is not None:
         query_conds.append("m.user_id = %s")
@@ -221,35 +238,21 @@ def search_matches_core(ally: List[str] = None, enemy: List[str] = None, user_id
 
     if query_conds:
         query += " WHERE " + " AND ".join(query_conds)
-    query += " GROUP BY t.match_id"
+    query += " GROUP BY m.match_id, m.ally_win, m.patch, f.ally_early_win, f.ally_late_win, f.close_game, f.pachinko, f.last_hit"
     if conds:
         query += " HAVING " + " AND ".join(conds)
 
     cursor.execute(query, tuple(params))
-    match_ids = [row[0] for row in cursor.fetchall()]
+    rows = cursor.fetchall()
 
     matches_data = []
-    for match_id in match_ids:
-        cursor.execute("SELECT ally_win, patch FROM matches WHERE match_id = %s", (match_id,))
-        match_row = cursor.fetchone()
-        if not match_row:
-            continue
-        ally_win, patch = match_row
+    for row in rows:
+        match_id, ally_win, patch, teams_json, features_json = row
+        ally_team = [t["pokemon"] for t in teams_json if t["team"] == "ally"]
+        enemy_team = [t["pokemon"] for t in teams_json if t["team"] == "enemy"]
 
-        cursor.execute("SELECT pokemon, team FROM teams WHERE match_id = %s", (match_id,))
-        teams_rows = cursor.fetchall()
-        ally_team = [p for p, t in teams_rows if t == "ally"]
-        enemy_team = [p for p, t in teams_rows if t == "enemy"]
-
-        cursor.execute(
-            "SELECT ally_early_win, ally_late_win, close_game, pachinko, last_hit FROM features WHERE match_id = %s",
-            (match_id,)
-        )
-        features_row = cursor.fetchone()
-        features = None
-        if features_row:
-            keys = ["ally_early_win", "ally_late_win", "close_game", "pachinko", "last_hit"]
-            features = {k: v for k, v in zip(keys, features_row) if v is not None}
+        # None のキーは消す
+        features = {k: v for k, v in (features_json or {}).items()}
 
         matches_data.append({
             "match_id": match_id,
@@ -262,6 +265,7 @@ def search_matches_core(ally: List[str] = None, enemy: List[str] = None, user_id
 
     conn.close()
     return {"matches": matches_data}
+
 
 def analyze_data(ally: List[str], enemy: List[str], user_id: Optional[int]=None):
     matches_data = search_matches_core(ally, enemy, user_id)["matches"]
