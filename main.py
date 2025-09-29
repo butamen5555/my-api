@@ -195,76 +195,87 @@ def add_match_reverse(match: Match):
 # 検索・分析
 # ----------------------
 def search_matches_core(ally: List[str] = None, enemy: List[str] = None, user_id: Optional[int] = None):
+    conn = psycopg2.connect(DATABASE_URL)
     ally = ally or []
     enemy = enemy or []
-    conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     params = []
     conds = []
 
-    # --- 条件構築 ---
+    # ally条件
     if ally:
         placeholders = ",".join(["%s"] * len(ally))
         conds.append(f"SUM(CASE WHEN t.team='ally' AND t.pokemon IN ({placeholders}) THEN 1 ELSE 0 END) = %s")
         params.extend(ally)
         params.append(len(ally))
+
+    # enemy条件
     if enemy:
         placeholders = ",".join(["%s"] * len(enemy))
         conds.append(f"SUM(CASE WHEN t.team='enemy' AND t.pokemon IN ({placeholders}) THEN 1 ELSE 0 END) = %s")
         params.extend(enemy)
         params.append(len(enemy))
 
+    # query
     query = """
-        SELECT 
+        SELECT
             m.match_id,
             m.ally_win,
             m.patch,
-            json_agg(DISTINCT jsonb_build_object('pokemon', t.pokemon, 'team', t.team)) AS teams,
-            jsonb_build_object(
-                'ally_early_win', f.ally_early_win,
-                'ally_late_win', f.ally_late_win,
-                'close_game', f.close_game,
-                'pachinko', f.pachinko,
-                'last_hit', f.last_hit
-            ) AS features
+            t.pokemon,
+            t.team,
+            f.ally_early_win,
+            f.ally_late_win,
+            f.close_game,
+            f.pachinko,
+            f.last_hit
         FROM matches m
         JOIN teams t ON m.match_id = t.match_id
         LEFT JOIN features f ON m.match_id = f.match_id
     """
+
     query_conds = []
     if user_id is not None:
         query_conds.append("m.user_id = %s")
         params.insert(0, user_id)
 
-    if query_conds:
+    if query_onds := query_conds:
         query += " WHERE " + " AND ".join(query_conds)
-    query += " GROUP BY m.match_id, m.ally_win, m.patch, f.ally_early_win, f.ally_late_win, f.close_game, f.pachinko, f.last_hit"
+
+    query += " GROUP BY m.match_id, t.pokemon, t.team, f.ally_early_win, f.ally_late_win, f.close_game, f.pachinko, f.last_hit"
+
     if conds:
         query += " HAVING " + " AND ".join(conds)
 
     cursor.execute(query, tuple(params))
     rows = cursor.fetchall()
 
-    matches_data = []
+    # match_idごとにまとめる
+    matches_dict = {}
     for row in rows:
-        match_id, ally_win, patch, teams_json, features_json = row
-        ally_team = [t["pokemon"] for t in teams_json if t["team"] == "ally"]
-        enemy_team = [t["pokemon"] for t in teams_json if t["team"] == "enemy"]
+        match_id, ally_win, patch, pokemon, team, early, late, close, pachinko, last_hit = row
+        if match_id not in matches_dict:
+            matches_dict[match_id] = {
+                "match_id": match_id,
+                "ally_win": ally_win,
+                "patch": patch,
+                "ally_team": [],
+                "enemy_team": [],
+                "features": {
+                    "ally_early_win": early,
+                    "ally_late_win": late,
+                    "close_game": close,
+                    "pachinko": pachinko,
+                    "last_hit": last_hit
+                }
+            }
+        if team == "ally":
+            matches_dict[match_id]["ally_team"].append(pokemon)
+        else:
+            matches_dict[match_id]["enemy_team"].append(pokemon)
 
-        # None のキーは消す
-        features = {k: v for k, v in (features_json or {}).items()}
+    return {"matches": list(matches_dict.values())}
 
-        matches_data.append({
-            "match_id": match_id,
-            "ally_win": ally_win,
-            "patch": patch,
-            "ally_team": ally_team,
-            "enemy_team": enemy_team,
-            "features": features
-        })
-
-    conn.close()
-    return {"matches": matches_data}
 
 
 def analyze_data(ally: List[str], enemy: List[str], user_id: Optional[int]=None):
