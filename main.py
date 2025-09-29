@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from psycopg2 import pool
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -7,6 +8,13 @@ from typing import List, Optional
 import time
 
 DATABASE_URL = os.environ["DATABASE_URL"]
+# ①接続プールを作成（アプリ起動時に1回だけ）
+# アプリ起動時に接続プールを作成（最小1, 最大10接続）
+db_pool = psycopg2.pool.SimpleConnectionPool(
+    1, 10,
+    dsn="postgresql://user:vSETJ5tNjJIu5Y88jawMJgFq9lvitWgG@dpg-d3d1ag3uibrs738athdg-a.singapore-postgres.render.com/unitehub"
+)
+
 
 # ----------------------
 # FastAPI 初期化
@@ -200,83 +208,101 @@ def search_matches_core(ally: List[str] = None, enemy: List[str] = None, user_id
     enemy = enemy or []
 
     start_total = time.time()
+
+    # プールから接続を取得
     conn_start = time.time()
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = db_pool.getconn()
     print("DB connect time:", time.time() - conn_start)
 
-    cursor = conn.cursor()
-    params = []
-    conds = []
-
-    if ally:
-        placeholders = ",".join(["%s"] * len(ally))
-        conds.append(f"SUM(CASE WHEN t.team='ally' AND t.pokemon IN ({placeholders}) THEN 1 ELSE 0 END) = %s")
-        params.extend(ally)
-        params.append(len(ally))
-    if enemy:
-        placeholders = ",".join(["%s"] * len(enemy))
-        conds.append(f"SUM(CASE WHEN t.team='enemy' AND t.pokemon IN ({placeholders}) THEN 1 ELSE 0 END) = %s")
-        params.extend(enemy)
-        params.append(len(enemy))
-
-    query = "SELECT t.match_id FROM teams t JOIN matches m ON t.match_id = m.match_id"
-    query_conds = []
-    if user_id is not None:
-        query_conds.append("m.user_id = %s")
-        params.insert(0, user_id)
-
-    if query_conds:
-        query += " WHERE " + " AND ".join(query_conds)
-    query += " GROUP BY t.match_id"
-    if conds:
-        query += " HAVING " + " AND ".join(conds)
-
-    start_query = time.time()
-    cursor.execute(query, tuple(params))
-    match_ids = [row[0] for row in cursor.fetchall()]
-    print("Query match_ids time:", time.time() - start_query, "matches found:", len(match_ids))
-
     matches_data = []
-    for match_id in match_ids:
-        t0 = time.time()
-        cursor.execute("SELECT ally_win, patch FROM matches WHERE match_id = %s", (match_id,))
-        match_row = cursor.fetchone()
-        print(f"Query match {match_id} time:", time.time() - t0)
 
-        if not match_row:
-            continue
-        ally_win, patch = match_row
+    try:
+        with conn.cursor() as cursor:
+            params = []
+            conds = []
 
-        t1 = time.time()
-        cursor.execute("SELECT pokemon, team FROM teams WHERE match_id = %s", (match_id,))
-        teams_rows = cursor.fetchall()
-        ally_team = [p for p, t in teams_rows if t == "ally"]
-        enemy_team = [p for p, t in teams_rows if t == "enemy"]
-        print(f"Query teams {match_id} time:", time.time() - t1)
+            if ally:
+                placeholders = ",".join(["%s"] * len(ally))
+                conds.append(f"SUM(CASE WHEN t.team='ally' AND t.pokemon IN ({placeholders}) THEN 1 ELSE 0 END) = %s")
+                params.extend(ally)
+                params.append(len(ally))
 
-        t2 = time.time()
-        cursor.execute(
-            "SELECT ally_early_win, ally_late_win, close_game, pachinko, last_hit FROM features WHERE match_id = %s",
-            (match_id,)
-        )
-        features_row = cursor.fetchone()
-        keys = ["ally_early_win", "ally_late_win", "close_game", "pachinko", "last_hit"]
-        features = {k: v for k, v in zip(keys, features_row)} if features_row else {k: None for k in keys}
-        print(f"Query features {match_id} time:", time.time() - t2)
+            if enemy:
+                placeholders = ",".join(["%s"] * len(enemy))
+                conds.append(f"SUM(CASE WHEN t.team='enemy' AND t.pokemon IN ({placeholders}) THEN 1 ELSE 0 END) = %s")
+                params.extend(enemy)
+                params.append(len(enemy))
 
-        matches_data.append({
-            "match_id": match_id,
-            "ally_win": ally_win,
-            "patch": patch,
-            "ally_team": ally_team,
-            "enemy_team": enemy_team,
-            "features": features
-        })
+            query = "SELECT t.match_id FROM teams t JOIN matches m ON t.match_id = m.match_id"
+            query_conds = []
+            if user_id is not None:
+                query_conds.append("m.user_id = %s")
+                params.insert(0, user_id)
 
-    conn.close()
+            if query_conds:
+                query += " WHERE " + " AND ".join(query_conds)
+            query += " GROUP BY t.match_id"
+            if conds:
+                query += " HAVING " + " AND ".join(conds)
+
+            start_query = time.time()
+            cursor.execute(query, tuple(params))
+            match_ids = [row[0] for row in cursor.fetchall()]
+            print("Query match_ids time:", time.time() - start_query, "matches found:", len(match_ids))
+
+            if not match_ids:
+                return {"matches": []}
+
+            # match_ids に対する情報をまとめて取得（IN句）
+            t0 = time.time()
+            cursor.execute(
+                "SELECT match_id, ally_win, patch FROM matches WHERE match_id = ANY(%s)",
+                (match_ids,)
+            )
+            matches_rows = {row[0]: {"ally_win": row[1], "patch": row[2]} for row in cursor.fetchall()}
+            print("Query all matches time:", time.time() - t0)
+
+            t1 = time.time()
+            cursor.execute(
+                "SELECT match_id, pokemon, team FROM teams WHERE match_id = ANY(%s)",
+                (match_ids,)
+            )
+            teams_dict = {}
+            for match_id_row, pokemon, team in cursor.fetchall():
+                if match_id_row not in teams_dict:
+                    teams_dict[match_id_row] = {"ally": [], "enemy": []}
+                teams_dict[match_id_row][team].append(pokemon)
+            print("Query all teams time:", time.time() - t1)
+
+            t2 = time.time()
+            cursor.execute(
+                "SELECT match_id, ally_early_win, ally_late_win, close_game, pachinko, last_hit FROM features WHERE match_id = ANY(%s)",
+                (match_ids,)
+            )
+            features_dict = {}
+            keys = ["ally_early_win", "ally_late_win", "close_game", "pachinko", "last_hit"]
+            for row in cursor.fetchall():
+                match_id_row = row[0]
+                features_dict[match_id_row] = {k: v for k, v in zip(keys, row[1:])}
+            print("Query all features time:", time.time() - t2)
+
+            # 結合
+            for match_id in match_ids:
+                matches_data.append({
+                    "match_id": match_id,
+                    "ally_win": matches_rows.get(match_id, {}).get("ally_win"),
+                    "patch": matches_rows.get(match_id, {}).get("patch"),
+                    "ally_team": teams_dict.get(match_id, {}).get("ally", []),
+                    "enemy_team": teams_dict.get(match_id, {}).get("enemy", []),
+                    "features": features_dict.get(match_id, {k: None for k in keys})
+                })
+
+    finally:
+        # プールに接続を返却
+        db_pool.putconn(conn)
+
     print("Total function time:", time.time() - start_total)
     return {"matches": matches_data}
-
 
 
 
