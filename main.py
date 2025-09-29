@@ -337,18 +337,38 @@ def search_matches(ally: List[str] = Query(default=[]), enemy: List[str] = Query
 
 @app.post("/search_next1/")
 def search_next1_post(req: SuggestRequest):
-    suggest = {}
-    for i in req.excess:
-        print(f"処理開始: {i}", flush=True)
-        new_ally = req.ally + [i]
-        data_analyzed = analyze_data(new_ally, req.enemy, req.user_id)
-        print(f"結果: {data_analyzed['summary']}", flush=True)
-        if data_analyzed["summary"]["total_matches"] > 0:
-            suggest[i] = data_analyzed["summary"]
+    all_matches = search_matches_core(req.ally, req.enemy, req.user_id)["matches"]
+    total_matches_dict = {}  # 各ポケモンの集計結果
 
-    suggest = dict(sorted(suggest.items(), key=lambda x: (x[1]["win_rate"] or 0), reverse=True)[:5])
-    print(f"最終suggest: {suggest}", flush=True)
+    for p in req.excess:
+        total = 0
+        wins = 0
+        feature_counts = {}
+
+        for m in all_matches:
+            # ally に追加したポケモンが参加している試合のみカウント
+            if p in m["ally_team"]:
+                total += 1
+                if m["ally_win"]:
+                    wins += 1
+                if m["features"]:
+                    for k, v in m["features"].items():
+                        if isinstance(v, bool):
+                            feature_counts[k] = feature_counts.get(k, 0) + int(v)
+                        else:
+                            feature_counts[k] = feature_counts.get(k, 0) + 1
+
+        if total > 0:
+            total_matches_dict[p] = {
+                "total_matches": total,
+                "win_rate": wins / total,
+                "feature_rates": {k: c / total for k, c in feature_counts.items()}
+            }
+
+    # 勝率でソートして上位5件
+    suggest = dict(sorted(total_matches_dict.items(), key=lambda x: (x[1]["win_rate"] or 0), reverse=True)[:5])
     return suggest
+
 
 
 @app.post("/search_next2/")
