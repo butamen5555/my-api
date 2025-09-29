@@ -51,6 +51,12 @@ class Match(BaseModel):
     features: Optional[Features] = None
     user_id: Optional[int] = None
 
+class SuggestRequest(BaseModel):
+    ally: List[str]
+    enemy: List[str]
+    excess: List[str]
+    user_id: Optional[str] = None
+
 # ----------------------
 # DB 初期化関数
 # ----------------------
@@ -329,35 +335,39 @@ def analyze_data(ally: List[str], enemy: List[str], user_id: Optional[int]=None)
 def search_matches(ally: List[str] = Query(default=[]), enemy: List[str] = Query(default=[])):
     return search_matches_core(ally, enemy)
 
-@app.get("/search_next1/")
-def search_next1(ally: List[str] = Query(default=[]), enemy: List[str] = Query(default=[]),
-                 excess: List[str] = Query(default=[]), user_id: Optional[int] = Query(default=None)):
+@app.post("/search_next1/")
+def search_next1_post(req: SuggestRequest):
     suggest = {}
-    for i in excess:
-        new_ally = ally + [i]
-        data_analyzed = analyze_data(new_ally, enemy, user_id)
+    for i in req.excess:
+        print(f"処理開始: {i}", flush=True)
+        new_ally = req.ally + [i]
+        data_analyzed = analyze_data(new_ally, req.enemy, req.user_id)
+        print(f"結果: {data_analyzed['summary']}", flush=True)
         if data_analyzed["summary"]["total_matches"] > 0:
             suggest[i] = data_analyzed["summary"]
+
     suggest = dict(sorted(suggest.items(), key=lambda x: (x[1]["win_rate"] or 0), reverse=True)[:5])
+    print(f"最終suggest: {suggest}", flush=True)
     return suggest
 
-@app.get("/search_next2/")
-def search_next2(ally: List[str] = Query(default=[]), enemy: List[str] = Query(default=[]),
-                 excess: List[str] = Query(default=[])):
+
+@app.post("/search_next2/")
+def search_next2_post(req: SuggestRequest):
     suggest = {}
     single_scores = {}
-    for p in excess:
-        new_ally = ally + [p]
-        data_analyzed = analyze_data(new_ally, enemy)
+    for p in req.excess:
+        new_ally = req.ally + [p]
+        data_analyzed = analyze_data(new_ally, req.enemy)
         if data_analyzed["summary"]["total_matches"] > 0:
             single_scores[p] = data_analyzed["summary"]
+
     top10 = sorted(single_scores.items(), key=lambda x: (x[1]["win_rate"] or 0), reverse=True)[:10]
     top10_names = [p for p, _ in top10]
 
     for idx_i, i in enumerate(top10_names):
         for j in top10_names[idx_i+1:]:
-            new_ally = ally + [i, j]
-            data_analyzed = analyze_data(new_ally, enemy)
+            new_ally = req.ally + [i, j]
+            data_analyzed = analyze_data(new_ally, req.enemy)
             if data_analyzed["summary"]["total_matches"] > 0:
                 suggest[f"{i},{j}"] = data_analyzed["summary"]
 
