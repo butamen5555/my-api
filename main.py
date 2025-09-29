@@ -6,7 +6,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 # ①接続プールを作成（アプリ起動時に1回だけ）
@@ -336,32 +335,21 @@ def analyze_data(ally: List[str], enemy: List[str], user_id: Optional[int]=None)
 def search_matches(ally: List[str] = Query(default=[]), enemy: List[str] = Query(default=[])):
     return search_matches_core(ally, enemy)
 
-
 @app.post("/search_next1/")
 def search_next1_post(req: SuggestRequest):
     suggest = {}
-
-    def process_pokemon(p):
-        print(f"処理開始: {p}", flush=True)
-        new_ally = req.ally + [p]
+    for i in req.excess:
+        print(f"処理開始: {i}", flush=True)
+        new_ally = req.ally + [i]
         data_analyzed = analyze_data(new_ally, req.enemy, req.user_id)
         print(f"結果: {data_analyzed['summary']}", flush=True)
         if data_analyzed["summary"]["total_matches"] > 0:
-            return (p, data_analyzed["summary"])
-        return None
+            suggest[i] = data_analyzed["summary"]
 
-    # 最大5スレッドで並列化
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(process_pokemon, p) for p in req.excess]
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                suggest[result[0]] = result[1]
-
-    # 上位5件だけ
     suggest = dict(sorted(suggest.items(), key=lambda x: (x[1]["win_rate"] or 0), reverse=True)[:5])
     print(f"最終suggest: {suggest}", flush=True)
     return suggest
+
 
 @app.post("/search_next2/")
 def search_next2_post(req: SuggestRequest):
