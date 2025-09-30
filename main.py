@@ -2,21 +2,17 @@ import os
 import psycopg2
 from psycopg2 import pool
 from fastapi import FastAPI, HTTPException, Query
-from fastapi import APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 import time
-import json
 from psycopg2.extras import Json, execute_values
-from datetime import datetime, timedelta
-
-CACHE_EXPIRE_MINUTES = 60
+from datetime import datetime
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 # ①接続プールを作成（アプリ起動時に1回だけ）
 # アプリ起動時に接続プールを作成（最小1, 最大10接続）
-db_pool = pool.SimpleConnectionPool(
+db_pool = psycopg2.pool.SimpleConnectionPool(
     1, 10,
     dsn="postgresql://user:vSETJ5tNjJIu5Y88jawMJgFq9lvitWgG@dpg-d3d1ag3uibrs738athdg-a.singapore-postgres.render.com/unitehub"
 )
@@ -26,7 +22,7 @@ db_pool = pool.SimpleConnectionPool(
 # FastAPI 初期化
 # ----------------------
 app = FastAPI()
-router = APIRouter()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -104,25 +100,14 @@ def init_db():
         last_hit BOOLEAN
     )
     """)
- # キャッシュテーブル
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS cache (
-        key TEXT PRIMARY KEY,
-        value JSONB NOT NULL,
-        expires_at TIMESTAMP NOT NULL
-    )
-    """)
-
-    # index
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_teams_pokemon ON teams(pokemon)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_matches_user ON matches(user_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at)")
-
     conn.commit()
     conn.close()
     print("DB初期化完了")
 
 init_db()
+
 # ----------------------
 # DB登録処理
 # ----------------------
@@ -158,40 +143,6 @@ def add_match_to_db(match: Match, user_id:int):
     conn.commit()
     conn.close()
 
-# ----------------------
-# キャッシュ作成処理
-# ----------------------
-def get_cache(conn, key: str):
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT value, expires_at FROM cache WHERE key = %s",
-        (key,)
-    )
-    row = cursor.fetchone()
-    if row:
-        value, expires_at = row
-        if expires_at > datetime.utcnow():
-            return value
-        else:
-            # 期限切れ
-            cursor.execute("DELETE FROM cache WHERE key = %s", (key,))
-            conn.commit()
-    return None
-
-def set_cache(conn, key: str, value: dict):
-    cursor = conn.cursor()
-    expires_at = datetime.utcnow() + timedelta(minutes=CACHE_EXPIRE_MINUTES)
-    cursor.execute(
-        """
-        INSERT INTO cache (key, value, expires_at)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (key) DO UPDATE
-        SET value = EXCLUDED.value,
-            expires_at = EXCLUDED.expires_at
-        """,
-        (key, json.dumps(value), expires_at)
-    )
-    conn.commit()
 # ----------------------
 # ユーザー管理
 # ----------------------
@@ -388,29 +339,36 @@ def search_matches(ally: List[str] = Query(default=[]), enemy: List[str] = Query
 
 @app.post("/search_next1/")
 def search_next1_post(req: SuggestRequest):
-    suggest = {}
-    conn = psycopg2.connect(DATABASE_URL)
+    all_matches = search_matches_core(req.ally, req.enemy, req.user_id)["matches"]
+    total_matches_dict = {}  # 各ポケモンの集計結果
 
     for p in req.excess:
-        # キャッシュキー作成
-        key = f"ally:{','.join(req.ally + [p])}|enemy:{','.join(req.enemy)}|user:{req.user_id}"
-        cached = get_cache(conn, key)
-        if cached:
-            suggest[p] = cached
-            continue
+        total = 0
+        wins = 0
+        feature_counts = {}
 
-        # キャッシュなし → 計算
-        new_ally = req.ally + [p]
-        data_analyzed = analyze_data(new_ally, req.enemy, req.user_id)
-        summary = data_analyzed["summary"]
+        for m in all_matches:
+            # ally に追加したポケモンが参加している試合のみカウント
+            if p in m["ally_team"]:
+                total += 1
+                if m["ally_win"]:
+                    wins += 1
+                if m["features"]:
+                    for k, v in m["features"].items():
+                        if isinstance(v, bool):
+                            feature_counts[k] = feature_counts.get(k, 0) + int(v)
+                        else:
+                            feature_counts[k] = feature_counts.get(k, 0) + 1
 
-        if summary["total_matches"] > 0:
-            suggest[p] = summary
-            set_cache(conn, key, summary)
+        if total > 0:
+            total_matches_dict[p] = {
+                "total_matches": total,
+                "win_rate": wins / total,
+                "feature_rates": {k: c / total for k, c in feature_counts.items()}
+            }
 
-    conn.close()
     # 勝率でソートして上位5件
-    suggest = dict(sorted(suggest.items(), key=lambda x: (x[1]["win_rate"] or 0), reverse=True)[:5])
+    suggest = dict(sorted(total_matches_dict.items(), key=lambda x: (x[1]["win_rate"] or 0), reverse=True)[:5])
     return suggest
 
 
