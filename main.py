@@ -3,11 +3,14 @@ import psycopg2
 from psycopg2 import pool
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import time
 from psycopg2.extras import Json, execute_values
 from datetime import datetime
+import subprocess
+
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 # ①接続プールを作成（アプリ起動時に1回だけ）
@@ -31,6 +34,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 簡易認証（管理者用）
+def admin_auth(token: str):
+    ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN")  # 環境変数から取得
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    return True
 # ----------------------
 # モデル定義
 # ----------------------
@@ -396,6 +405,52 @@ def search_next2_post(req: SuggestRequest):
     suggest = dict(sorted(suggest.items(), key=lambda x: (x[1]["win_rate"] or 0), reverse=True)[:5])
     return suggest
 
+# ----------------------
+# DB バックアップ
+# ----------------------
+def backup_db():
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_file = f"/tmp/backup_{timestamp}.sql"
+    # PostgreSQL のバックアップ
+    cmd = f"pg_dump {os.environ['DATABASE_URL']} > {backup_file}"
+    subprocess.run(cmd, shell=True, check=True)
+    return backup_file
+
+@app.get("/download_db/")
+def download_db(token: str):
+    admin_auth(token)
+    filepath = backup_db()
+    return FileResponse(filepath, filename=os.path.basename(filepath), media_type="application/sql")
+
+
+# ----------------------
+# DB 消去
+# ----------------------
+def clear_db():
+    # 全テーブル削除
+    cmd = f'psql {os.environ["DATABASE_URL"]} -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"'
+    subprocess.run(cmd, shell=True, check=True)
+
+@app.post("/clear_db/")
+def clear_db_route(token: str):
+    admin_auth(token)
+    clear_db()
+    return {"status": "cleared"}
+
+def clear_match_data():
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute("TRUNCATE TABLE features CASCADE")
+    cursor.execute("TRUNCATE TABLE teams CASCADE")
+    cursor.execute("TRUNCATE TABLE matches CASCADE")
+    conn.commit()
+    conn.close()
+
+@app.post("/clear_match_data/")
+def clear_match_data_route(token: str):
+    admin_auth(token)
+    clear_match_data()
+    return {"status": "match_data_cleared"}
 # ----------------------
 # 起動
 # ----------------------
